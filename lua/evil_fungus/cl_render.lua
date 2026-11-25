@@ -41,6 +41,7 @@ local BODY_SHOW = 6
 local BODY_GONE = 0.01
 local PULSE, PULSE_RATE, PULSE_SPREAD = 0.15, 2.5, 0.9
 local SHADE_LOW = 0.55
+local DENSE_SHADE = 0.5
 local TEX_STRETCH = 1.4
 local WEB_HALF = 40
 local WEB_FULL = 10
@@ -424,7 +425,7 @@ local function Build(chunk)
 	local ok, err = pcall(function()
 		for _, e in ipairs(list) do
 			local k = e.level / LEVELS
-			local tint = 0.9 + 0.2 * Hash(e.eid + 7)
+			local tint = (0.9 + 0.2 * Hash(e.eid + 7)) * ((e.a.dense or e.b.dense) and DENSE_SHADE or 1)
 			local r = Radius(e)
 			Tube(e, r, r * TAPER, ROOT_SIDES,
 				Lerp(k, ROOT[1], VEIN[1]) * tint, Lerp(k, ROOT[2], VEIN[2]) * tint, Lerp(k, ROOT[3], VEIN[3]) * tint, nil, true)
@@ -453,8 +454,9 @@ local cells, cellCount = {}, 0
 
 local function BodyEdge(e, ra, rb, sides, segments)
 	local k = math.Clamp((e.a.shown + e.b.shown) / 8, 0, 1)
+	local dim = (e.a.dense or e.b.dense) and DENSE_SHADE or 1
 	Tube(e, ra, rb, sides,
-		Lerp(k, BODY_THIN[1], BODY_THICK[1]), Lerp(k, BODY_THIN[2], BODY_THICK[2]), Lerp(k, BODY_THIN[3], BODY_THICK[3]), segments)
+		Lerp(k, BODY_THIN[1], BODY_THICK[1]) * dim, Lerp(k, BODY_THIN[2], BODY_THICK[2]) * dim, Lerp(k, BODY_THIN[3], BODY_THICK[3]) * dim, segments)
 end
 
 -- How far a strand bows away from straight at its middle.

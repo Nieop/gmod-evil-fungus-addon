@@ -76,9 +76,10 @@ net.Receive("EvilFungusMat", function()
 	for _ = 1, net.ReadUInt(8) do
 		local nid = net.ReadUInt(24)
 		local pos, normal, folded = net.ReadVector(), net.ReadNormal(), net.ReadUInt(6)
+		local dense = net.ReadUInt(1) == 1
 		local felt = folded > 0
 		if not M.nodes[nid] then
-			local node = { nid = nid, pos = pos, normal = normal, edges = {}, target = 0, shown = 0, felt = felt or nil, folded = folded }
+			local node = { nid = nid, pos = pos, normal = normal, edges = {}, target = 0, shown = 0, felt = felt or nil, folded = folded, dense = dense or nil }
 			M.nodes[nid] = node
 			M.count = M.count + 1
 			if felt then
@@ -147,6 +148,21 @@ net.Receive("EvilFungusBody", function()
 	end
 	for node in pairs(M.body) do
 		if not seen[node] then node.target = 0 end
+	end
+end)
+
+-- A strand torn out hardens its neighbours, so the server names whichever strands turned dense. Their
+-- chunks are built again with the darker colour, and the body cells that hold them too.
+net.Receive("EvilFungusDense", function()
+	for _ = 1, net.ReadUInt(12) do
+		local node = M.nodes[net.ReadUInt(24)]
+		if node and not node.dense then
+			node.dense = true
+			for _, e in ipairs(node.edges) do
+				if e.chunk then M.Stale(e.chunk, GROWN) end
+				if e.bodyCell then e.bodyCell.bodyBuilt = nil end
+			end
+		end
 	end
 end)
 

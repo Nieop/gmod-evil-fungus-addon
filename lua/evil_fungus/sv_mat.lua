@@ -90,8 +90,8 @@ local function Unpack(node)
 end
 
 -- A hidden strand is server-only: the client never hears about it or any link to it.
-function Mat:Add(pos, normal, height, hidden)
-	local node = { pos = pos, normal = normal, m = 0, edges = {}, air = height and true or nil, height = height or 0, born = CurTime(), hidden = hidden or nil }
+function Mat:Add(pos, normal, height, hidden, dense)
+	local node = { pos = pos, normal = normal, m = 0, edges = {}, air = height and true or nil, height = height or 0, born = CurTime(), hidden = hidden or nil, dense = dense or nil }
 	Unpack(node)
 	Place(self, node)
 	if EvilFungus.Net and not hidden then EvilFungus.Net.Node(node) end
@@ -217,6 +217,18 @@ function Mat:Remove(node)
 	self.count = self.count - 1
 	node.dead = true
 	if node.sleepers and not node.waking then Bury(self, node) end
+end
+
+-- A strand torn out of the mat hardens what's still joined to it: every strand connected to the spot it
+-- came from turns dense. Fire is the exception, and its caller doesn't ask for this when a strand burns.
+function Mat:Densify(node)
+	for _, e in ipairs(node.edges) do
+		local other = e.a == node and e.b or e.a
+		if not other.dead and not other.felt and not other.burn and not other.dense then
+			other.dense = true
+			if EvilFungus.Net and not other.hidden then EvilFungus.Net.Dense(other) end
+		end
+	end
 end
 
 function Mat:Weave(node, catch)
@@ -357,7 +369,7 @@ function Mat:Grow(from, dir, now, spacing)
 	if not pos or self:Crowded(pos, normal, spacing) then return end
 	if bit.band(util.PointContents(pos + normal * 2), bit.bor(CONTENTS_WATER, CONTENTS_SLIME)) ~= 0 then return end
 
-	local node = self:Add(pos, normal)
+	local node = self:Add(pos, normal, nil, nil, from.dense)
 	self:Link(from, node, now)
 	self:Near(pos, FUSE, function(other)
 		if other ~= node and other ~= from and Mat.Facing(node, other) and not self:Linked(node, other)
@@ -374,7 +386,7 @@ function Mat:Leap(from, pos, normal, now, force)
 	-- for Crowded to refuse; that proximity is what used to count as reaching it.
 	if not force and self:Crowded(pos, normal) then return end
 	if bit.band(util.PointContents(pos + normal * 2), bit.bor(CONTENTS_WATER, CONTENTS_SLIME)) ~= 0 then return end
-	local node = self:Add(pos, normal)
+	local node = self:Add(pos, normal, nil, nil, from.dense)
 	self:Link(from, node, now)
 	self:Near(pos, FUSE, function(other)
 		if other ~= node and other ~= from and Mat.Facing(node, other) and not self:Linked(node, other)
@@ -395,7 +407,7 @@ function Mat:Rise(from, dir, now)
 	if self:Crowded(pos, from.normal) then return end
 	if bit.band(util.PointContents(pos), bit.bor(CONTENTS_WATER, CONTENTS_SLIME)) ~= 0 then return end
 
-	local node = self:Add(pos, from.normal, from.height + 1)
+	local node = self:Add(pos, from.normal, from.height + 1, nil, from.dense)
 	self:Link(from, node, now)
 	return node
 end
@@ -531,7 +543,7 @@ function Mat:Bud(felt, dir, now)
 	local pos, normal = self:Walk({ pos = rim, normal = n }, dir)
 	if not pos or self:Crowded(pos, normal) then return end
 	if bit.band(util.PointContents(pos + normal * 2), bit.bor(CONTENTS_WATER, CONTENTS_SLIME)) ~= 0 then return end
-	local node = self:Add(pos, normal)
+	local node = self:Add(pos, normal, nil, nil, felt.dense)
 	self:Link(felt, node, now)
 	return node
 end

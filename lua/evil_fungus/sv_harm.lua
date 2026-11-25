@@ -107,8 +107,10 @@ function Harm.Ignite(colony, node, now, fire)
 	end
 end
 
-local function Kill(colony, node, scorch)
+local function Kill(colony, node, scorch, burnt)
 	if node.dead then return end
+	-- Fire eats a strand away clean. Anything else tears it out, and what's left joined to the spot hardens.
+	if not burnt and not node.burn then colony.Mat:Densify(node) end
 	if scorch and math.random() < SCORCH then
 		util.Decal("SmallScorch", node.pos + node.normal * 8, node.pos - node.normal * 8)
 	end
@@ -294,7 +296,7 @@ local function Burn(now)
 			end
 			for i, node in ipairs(spread) do Harm.Ignite(colony, node, now, from[i]) end
 			for _, node in ipairs(leap) do Leap(node, now) end
-			for _, node in ipairs(burnt) do Kill(colony, node, true) end
+			for _, node in ipairs(burnt) do Kill(colony, node, true, true) end
 		end
 	end
 end

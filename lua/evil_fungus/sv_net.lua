@@ -1,5 +1,5 @@
 EvilFungus = EvilFungus or {}
-local Net = EvilFungus.Net or { nodes = {}, edges = {}, nextNode = 1, nextEdge = 1, players = {}, dropped = {}, dirty = {} }
+local Net = EvilFungus.Net or { nodes = {}, edges = {}, nextNode = 1, nextEdge = 1, players = {}, dropped = {}, dense = {}, dirty = {} }
 EvilFungus.Net = Net
 
 local LEVELS = 15
@@ -20,12 +20,14 @@ local RESYNC_GAP = 5
 Net.LEVELS = LEVELS
 Net.BODY_MAX_MASS = BODY_MAX_MASS
 Net.count = Net.count or table.Count(Net.nodes)
+Net.dense = Net.dense or {}
 
 util.AddNetworkString("EvilFungusReady")
 util.AddNetworkString("EvilFungusMat")
 util.AddNetworkString("EvilFungusDrop")
 util.AddNetworkString("EvilFungusLevels")
 util.AddNetworkString("EvilFungusBody")
+util.AddNetworkString("EvilFungusDense")
 
 local function Thickness(e)
 	local Mat = EvilFungus.Mat
@@ -75,6 +77,13 @@ function Net.Drop(node)
 	end
 end
 
+-- Dense only ever turns on, so a live client only needs to hear which strands changed; a late joiner
+-- gets the flag in the node record itself.
+function Net.Dense(node)
+	if not node.nid then return end
+	Net.dense[#Net.dense + 1] = node.nid
+end
+
 net.Receive("EvilFungusReady", function(_, ply)
 	local now, st = RealTime(), Net.players[ply]
 	if st and now - (st.asked or 0) < RESYNC_GAP then return end
@@ -120,6 +129,7 @@ local function Sync(ply, st)
 		net.WriteVector(node.pos)
 		net.WriteNormal(node.normal)
 		net.WriteUInt(node.felt and math.Clamp(node.folded or 1, 1, 63) or 0, 6)
+		net.WriteUInt(node.dense and 1 or 0, 1)
 	end
 	net.WriteUInt(#edges, 8)
 	for _, e in ipairs(edges) do
@@ -139,6 +149,18 @@ local function SendDrops(ready)
 		net.Start("EvilFungusDrop")
 		net.WriteUInt(last - first + 1, 12)
 		for i = first, last do net.WriteUInt(dropped[i], 24) end
+		net.Send(ready)
+	end
+end
+
+local function SendDense(ready)
+	local dense = Net.dense
+	Net.dense = {}
+	for first = 1, #dense, DROP_CHUNK do
+		local last = math.min(#dense, first + DROP_CHUNK - 1)
+		net.Start("EvilFungusDense")
+		net.WriteUInt(last - first + 1, 12)
+		for i = first, last do net.WriteUInt(dense[i], 24) end
 		net.Send(ready)
 	end
 end
@@ -275,9 +297,11 @@ local function Step()
 
 	if #ready == 0 then
 		Net.dropped = {}
+		Net.dense = {}
 		return
 	end
 	if #Net.dropped > 0 then SendDrops(ready) end
+	if #Net.dense > 0 then SendDense(ready) end
 	if now >= nextLevels then
 		nextLevels = now + LEVEL_INTERVAL
 		SendLevels(ready)
