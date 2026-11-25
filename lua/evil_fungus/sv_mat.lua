@@ -220,11 +220,12 @@ function Mat:Remove(node)
 end
 
 -- A strand torn out of the mat hardens what's still joined to it: every strand connected to the spot it
--- came from turns dense. Fire is the exception, and its caller doesn't ask for this when a strand burns.
+-- came from turns dense, as long as it's carrying body of its own. Empty strands are already on their way
+-- out, so they stay normal. Fire is the exception, and its caller doesn't ask for this when a strand burns.
 function Mat:Densify(node)
 	for _, e in ipairs(node.edges) do
 		local other = e.a == node and e.b or e.a
-		if not other.dead and not other.felt and not other.burn and not other.dense then
+		if not other.dead and not other.felt and not other.burn and not other.dense and other.m >= 1 then
 			other.dense = true
 			if EvilFungus.Net and not other.hidden then EvilFungus.Net.Dense(other) end
 		end
