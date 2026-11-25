@@ -25,6 +25,9 @@ local MAX_NODES = 1500
 local EXPANSIONS_PER_TICK = 6
 local SEEDS_NEAR = 8
 local SEEDS_RANDOM = 8
+-- Body a piece cut off from the bulk needs before it's worth letting it look for a way round. Below this it
+-- has nothing left to grow with, so it stays out of the search.
+local CARRY_MASS = 1
 local GOAL_REACH = 80
 local LIFT = 4
 local STALL = 3
@@ -140,13 +143,15 @@ end
 
 -- Where on the mat to start feeling from: the bit already nearest, which is where greed got stuck, and a
 -- scattering from the rest, since the way round often starts somewhere else entirely.
--- The part of the mat the body can actually get to: everything joined by strands to wherever most of the
--- mass is. Bits that got cut off (burnt through, blown apart, settled away) are still lying around and still
--- count as mat, but nothing can flow out to them, so they can't grow, pay for anything, or carry a route on.
+-- The strands a search may start from: everything joined by strands to wherever most of the mass is, plus
+-- any other piece still carrying body of its own. The biggest piece is the body proper, the only thing flow
+-- can reach, but a lobe cut off from it (burnt through, blown apart, settled away) keeps whatever body it
+-- had, can grow with that, and is often the very bit left nearest the target, so it gets to look for a way
+-- round too. Pieces with no body left still count as mat, but can't grow, pay for anything, or carry a route.
 -- Worked out once per decision and reused.
 function ENT:Connected(now)
 	if self.BodySet and self.BodySetAt == now then return self.BodySet end
-	local label, best, bestMass = {}, nil, -1
+	local label, best, bestMass, live = {}, nil, -1, {}
 	for _, node in pairs(self.Mat.nodes) do
 		if not label[node] then
 			local part, mass, stack = {}, 0, { node }
@@ -165,10 +170,18 @@ function ENT:Connected(now)
 				end
 			end
 			if mass > bestMass then best, bestMass = part, mass end
+			if mass >= CARRY_MASS then live[#live + 1] = part end
 		end
 	end
-	self.BodySet, self.BodySetAt = best or {}, now
-	return self.BodySet
+	local body = {}
+	for n in pairs(best or {}) do body[n] = true end
+	for _, part in ipairs(live) do
+		if part ~= best then
+			for n in pairs(part) do body[n] = true end
+		end
+	end
+	self.BodySet, self.BodySetAt = body, now
+	return body
 end
 
 -- The strand of the body nearest a spot, for steering the body at.
