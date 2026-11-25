@@ -255,16 +255,26 @@ local function Behind(node, x, y, z)
 	return (node.x - x) * nx + (node.y - y) * ny + (node.z - z) * nz > BEHIND_MARGIN
 end
 
-function ENT:Closest(pos, sided)
+-- The strand nearest a point. sided discounts strands whose face looks away, so the body goes for the front
+-- of something rather than the far side of it. carry skips strands with no body of their own: a piece cut
+-- off from the rest still lies where it fell and is often the nearest thing to the target, but nothing can
+-- be sent to it, and a goal sitting on it leaves the flow's distances with nowhere to go at all.
+function ENT:Closest(pos, sided, carry)
 	local px, py, pz = pos:Unpack()
-	local node = self.Mat:Nearest(pos, NEAR_GOAL, sided and function(n) return not Behind(n, px, py, pz) end or nil)
+	local function ok(n)
+		if carry and n.m <= EMPTY then return false end
+		return not sided or not Behind(n, px, py, pz)
+	end
+	local node = self.Mat:Nearest(pos, NEAR_GOAL, ok)
 	if node then return node end
 	local bestD2 = math.huge
 	for _, n in pairs(self.Mat.nodes) do
-		local dx, dy, dz = n.x - px, n.y - py, n.z - pz
-		local d2 = dx * dx + dy * dy + dz * dz
-		if sided and Behind(n, px, py, pz) then d2 = d2 * BEHIND end
-		if d2 < bestD2 then node, bestD2 = n, d2 end
+		if not carry or n.m > EMPTY then
+			local dx, dy, dz = n.x - px, n.y - py, n.z - pz
+			local d2 = dx * dx + dy * dy + dz * dz
+			if sided and Behind(n, px, py, pz) then d2 = d2 * BEHIND end
+			if d2 < bestD2 then node, bestD2 = n, d2 end
+		end
 	end
 	return node
 end
@@ -438,7 +448,7 @@ function ENT:Decide(now)
 	self.Tending = not self.Hunting and self:Patient() or nil
 	if self.Hunting then
 		self.Target = known and self:Lead(prey, now) or self.PreyFrom or node.pos
-		goal = self:Closest(self.Target, true) or node
+		goal = self:Closest(self.Target, true, true) or node
 		self.PreyNode = goal
 		goal = self:Around(goal, now)
 	elseif self.Tending then
@@ -460,11 +470,11 @@ function ENT:Decide(now)
 		if not self.Target or now >= self.TargetUntil then self:PickTarget(now) end
 		goal = self.Goal
 		if self.GoalStale or not goal or goal.dead then
-			goal = self:Closest(self.Target, true)
+			goal = self:Closest(self.Target, true, true)
 			self.GoalStale = false
 		end
 		goal = self:Around(goal, now)
-		if not body and not self.Resting and goal.m > GROW_MASS and goal.pos:Distance(self.Target) < ARRIVE then
+		if not body and not self.Resting and goal and goal.m > GROW_MASS and goal.pos:Distance(self.Target) < ARRIVE then
 			self.Resting = true
 			self.TargetUntil = math.min(self.TargetUntil, now + math.Rand(REST_TIME[1], REST_TIME[2]))
 		end
@@ -515,7 +525,8 @@ function ENT:Errands()
 end
 
 function ENT:Lobes(goal, want)
-	local list = { { key = "main", goal = goal, want = want } }
+	local list = {}
+	if goal then list[1] = { key = "main", goal = goal, want = want } end
 	local cap = math.min(math.floor(EvilFungus.Setting("split")), math.floor(self.Body / LOBE_BODY))
 	if cap > 1 then
 		for _, lobe in ipairs(self:Errands()) do
@@ -527,7 +538,7 @@ function ENT:Lobes(goal, want)
 	local sources, owner = {}, {}
 	for _, lobe in ipairs(list) do
 		local start = -(self.Bias[lobe.key] or 0)
-		if not sources[lobe.goal] or start < sources[lobe.goal] then
+		if lobe.goal and (not sources[lobe.goal] or start < sources[lobe.goal]) then
 			sources[lobe.goal], owner[lobe.goal] = start, lobe
 		end
 	end
