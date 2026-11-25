@@ -36,7 +36,11 @@ local NEAR = 64
 local MOVED = 256
 local PLAN_DROP = 512
 local LOCK_TIME = 6
-local KEEP_MOVED = 160
+local KEEP_MOVED = 400
+-- A route ending this close to the target still counts as being on it, whether or not the far end can see
+-- the target: a short strafe behind a crate used to throw the whole way round away, since only the line of
+-- sight counted.
+local KEEP_NEAR = 160
 -- A route point only counts as reached when a strand is planted on the point itself. Growth steps in
 -- strides and lands where it lands, so LeapTo puts a node exactly on the point to finish it; merely
 -- being near it no longer counts.
@@ -515,13 +519,14 @@ function ENT:RoutePoint(now)
 	if not route then return end
 	local points = route.points
 	if target:DistToSqr(route.for_) > KEEP_MOVED * KEEP_MOVED then
-		-- Moved a little and still in plain view of where the route comes out: the route still does.
-		-- Otherwise, if where it comes out is still well nearer the target than anything the mat has, it's
-		-- still worth finishing: throwing it away and searching again from the stuck front only finds the same
-		-- way out, or a worse one, and a partial route never had the target in view in the first place.
+		-- Moved and still in plain view of where the route comes out, or the route now comes out right on top
+		-- of it: the route still does. Otherwise, if where it comes out is still well nearer the target than
+		-- anything the mat has, it's still worth finishing: throwing it away and searching again from the stuck
+		-- front only finds the same way out, or a worse one, and a partial route never had the target in view
+		-- in the first place.
 		local last = points[#points]
 		local have = self:Closest(target, true)
-		if target:DistToSqr(route.for_) < MOVED * MOVED and Clear(last.pos, last.normal, target) then
+		if Clear(last.pos, last.normal, target) or last.pos:DistToSqr(target) < KEEP_NEAR * KEEP_NEAR then
 			route.for_ = Vector(target.x, target.y, target.z)
 		elseif have and last.pos:Distance(target) < have.pos:Distance(target) - PARTIAL_GAIN then
 			route.for_, route.partial = Vector(target.x, target.y, target.z), true
