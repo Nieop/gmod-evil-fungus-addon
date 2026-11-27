@@ -85,14 +85,17 @@ local WET = bit.bor(CONTENTS_WATER, CONTENTS_SLIME)
 
 -- All fungus on the map shares one budget of steps a tick, so several stuck patches can't stall the server.
 -- It's split evenly between the ones searching, or whichever thought first each tick took the lot and the
--- rest never finished a search.
+-- rest never finished a search. nav_rate multiplies the budget: the search and the feelers both draw from
+-- it, so turning it up finds a route sooner at the cost of more server time per tick.
 hook.Add("Tick", "EvilFungusNav", function()
 	local n = 0
 	for colony in pairs(EvilFungus.Colonies or {}) do
 		if IsValid(colony) and colony.Plan then n = n + 1 end
 	end
-	EvilFungus.NavLeft = EXPANSIONS_PER_TICK
-	EvilFungus.NavShare = math.max(1, math.floor(EXPANSIONS_PER_TICK / math.max(1, n)))
+	local rate = EvilFungus.Setting("nav_rate") or 1
+	local budget = math.max(1, math.floor(EXPANSIONS_PER_TICK * rate + 0.5))
+	EvilFungus.NavLeft = budget
+	EvilFungus.NavShare = math.max(1, math.floor(budget / math.max(1, n)))
 end)
 
 local function Key(pos, normal)
@@ -188,7 +191,9 @@ function ENT:Connected(now)
 	return body
 end
 
--- The strand of the body nearest a spot, for steering the body at.
+-- The strand of the body nearest a spot, for steering the body at. Anything joined to the body counts, a bare
+-- front tip included: the piece feeds it, so where it lies is where the body is heading, and refusing it sends
+-- the body all the way back to whatever last held mass.
 local function BodyNearest(mat, body, pos)
 	local node = mat:Nearest(pos, 96, function(n) return body[n] and not n.air end)
 	if node then return node end
@@ -208,6 +213,9 @@ end
 local function Seeds(body, target)
 	local near, pool = {}, {}
 	local function Consider(node)
+		-- A bare strand still seeds a search: it is joined to the body, so it can be fed from the rest, and a
+		-- path of bare strands is a path. Only pieces with no body anywhere are left out, and those never get
+		-- here -- they aren't in the body set.
 		pool[#pool + 1] = node
 		local d2 = node.pos:DistToSqr(target)
 		if #near < SEEDS_NEAR or d2 < near[#near].d2 then
@@ -416,7 +424,7 @@ function ENT:StepPlan(now)
 			-- search already filled in and gave up on. Only when there's no edge left at all (everything
 			-- reachable looked at) does plain nearest stand.
 			local c = Frontier(heap) or plan.closest
-			local have = self:Closest(target, true)
+			local have = self:Closest(target)
 			if c and c.from and have and c.h < have.pos:Distance(target) - PARTIAL_GAIN then
 				return self:FinishPlan(c, now, true)
 			end
@@ -495,7 +503,7 @@ function ENT:LeapTo(p, now)
 		-- On the crease first, so the strand follows the solid round the bend instead of cutting the corner.
 		-- The crease strand is new and has no body of its own yet, so the strand the reach starts from pays
 		-- for both plants; it has to be able to afford both before the first one goes down.
-		if from.m < self:GrowCost() * 2 then return end
+		if from.m < self:GrowCost(from.dense) * 2 then return end
 		local crease = self:Leap(from, c.pos, c.normal, now)
 		if not crease then return end
 		body[crease] = true
@@ -525,7 +533,7 @@ function ENT:RoutePoint(now)
 		-- front only finds the same way out, or a worse one, and a partial route never had the target in view
 		-- in the first place.
 		local last = points[#points]
-		local have = self:Closest(target, true)
+		local have = self:Closest(target)
 		if Clear(last.pos, last.normal, target) or last.pos:DistToSqr(target) < KEEP_NEAR * KEEP_NEAR then
 			route.for_ = Vector(target.x, target.y, target.z)
 		elseif have and last.pos:Distance(target) < have.pos:Distance(target) - PARTIAL_GAIN then
@@ -738,7 +746,7 @@ function ENT:StepProbes(now)
 			end
 		end
 		if not probe or plan.expanded >= PROBE_BUDGET then
-			local c, have = plan.closest, self:Closest(target, true)
+			local c, have = plan.closest, self:Closest(target)
 			if c and c.from and have and c.h < have.pos:Distance(target) - PARTIAL_GAIN then
 				return self:FinishPlan(c, now, true)
 			end

@@ -19,6 +19,9 @@ local HIT_GRACE = 2
 local SLAM_SPEED = 250
 local WAKE_AFTER = 10
 local WIRE_REACH = 96
+local DENSE_REACH = 96
+-- Seconds between judging a held body's skin again: the mat under it can harden after the nest was set.
+local DENSE_RECHECK = 2
 
 local SHRINK_SPAN = 0.25
 local FOOD_PER_KG = 0.5
@@ -349,6 +352,7 @@ local function Wake(s)
 	rag:SetNW2Int(EvilFungus.STAGE_VAR, 0)
 	rag:SetNW2Int(KEPT_VAR, 0)
 	rag:SetNW2Bool(EvilFungus.WHOLE_VAR, false)
+	rag:SetNW2Bool(EvilFungus.DENSE_VAR, false)
 	for _, b in ipairs(s.schedule or {}) do
 		if b.scale > 0 then rag:ManipulateBoneScale(b.bone, Vector(1, 1, 1)) end
 	end
@@ -494,6 +498,24 @@ function Sleep.Under(ent, fungus)
 	return rag
 end
 
+-- Dense strands are the hardened kind. A body taken by them should wear the dense skin, not the soft one, so
+-- count the mat around the nest -- the strands actually holding a body spread over a little patch -- and go with
+-- the majority. The felt patch a settled body lies in carries its own dense flag, so that counts too.
+local function MostlyDense(mat, pos)
+	if not mat or not pos then return false end
+	local dense, total = 0, 0
+	mat:Near(pos, DENSE_REACH, function(node)
+		if not node.dead then
+			total = total + 1
+			if node.dense then dense = dense + 1 end
+		end
+	end)
+	return total > 0 and dense * 2 > total
+end
+
+-- Hosts rise through Raise, which must keep the flag: a body that stood up out of dense strands keeps the skin.
+Sleep.MostlyDense = MostlyDense
+
 -- Wherever any part of them is lying on it, it has them.
 local function Contact(rag)
 	local pos = rag:GetPos()
@@ -534,8 +556,18 @@ local function Check(s, now)
 	end
 	if s.nest ~= node then
 		s.nest = node
+		s.dense = MostlyDense(colony.Mat, node.pos)
+		s.denseAt = now
 		s.rag:SetNW2Vector(EvilFungus.NEST_VAR, node.pos)
 		s.rag:SetNW2Vector(EvilFungus.NEST_UP_VAR, node.normal)
+		s.rag:SetNW2Bool(EvilFungus.DENSE_VAR, s.dense)
+	elseif now - (s.denseAt or 0) > DENSE_RECHECK then
+		s.denseAt = now
+		local dense = MostlyDense(colony.Mat, node.pos)
+		if dense ~= s.dense then
+			s.dense = dense
+			s.rag:SetNW2Bool(EvilFungus.DENSE_VAR, dense)
+		end
 	end
 	if s.stage == LOOSE then Consume(s) end
 end
@@ -639,6 +671,7 @@ function EvilFungus.Unwire(rag)
 	if IsValid(w.fungus) then w.fungus:Unclaim(rag) end
 	if not IsValid(rag) then return end
 	rag:SetNW2Int(EvilFungus.STAGE_VAR, 0)
+	rag:SetNW2Bool(EvilFungus.DENSE_VAR, false)
 	for _, b in ipairs(w.schedule) do
 		if b.scale > 0 then rag:ManipulateBoneScale(b.bone, Vector(1, 1, 1)) end
 	end
@@ -656,6 +689,7 @@ local function Rewire(rag, w)
 		w.nest = node
 		rag:SetNW2Vector(EvilFungus.NEST_VAR, node.pos)
 		rag:SetNW2Vector(EvilFungus.NEST_UP_VAR, node.normal)
+		rag:SetNW2Bool(EvilFungus.DENSE_VAR, MostlyDense(colony.Mat, node.pos))
 	end
 end
 

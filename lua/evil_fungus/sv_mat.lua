@@ -89,8 +89,14 @@ local function Unpack(node)
 	node.up = node.normal.z
 end
 
--- A hidden strand is server-only: the client never hears about it or any link to it.
+-- A hidden strand is server-only: the client never hears about it or any link to it. A strand of a patch grown
+-- from a dense spore is dense itself, so the mat-wide flag stands in for the per-strand one.
 function Mat:Add(pos, normal, height, hidden, dense)
+	if dense == nil then dense = self.dense end
+	-- Hardening off means nothing new comes out dense, however it got asked for. Strands already dense stay that
+	-- way: the client only ever hears about a strand turning dense, never back, so turning it off only stops it
+	-- spreading until the map reloads.
+	if dense and EvilFungus.Setting("dense") <= 0 then dense = nil end
 	local node = { pos = pos, normal = normal, m = 0, edges = {}, air = height and true or nil, height = height or 0, born = CurTime(), hidden = hidden or nil, dense = dense or nil }
 	Unpack(node)
 	Place(self, node)
@@ -219,16 +225,20 @@ function Mat:Remove(node)
 	if node.sleepers and not node.waking then Bury(self, node) end
 end
 
+-- Hardens exactly this strand. Dense only ever turns on, so the client hears about it once.
+function Mat:Harden(node)
+	if node.dense or node.dead or node.felt or node.burn then return end
+	if EvilFungus.Setting("dense") <= 0 then return end
+	node.dense = true
+	if EvilFungus.Net and not node.hidden then EvilFungus.Net.Dense(node) end
+end
+
 -- A strand torn out of the mat hardens what's still joined to it: every strand connected to the spot it
--- came from turns dense, as long as it's carrying body of its own. Empty strands are already on their way
--- out, so they stay normal. Fire is the exception, and its caller doesn't ask for this when a strand burns.
+-- came from turns dense, body or not. Fire is the exception, and its caller doesn't ask for this when a
+-- strand burns.
 function Mat:Densify(node)
 	for _, e in ipairs(node.edges) do
-		local other = e.a == node and e.b or e.a
-		if not other.dead and not other.felt and not other.burn and not other.dense and other.m >= 1 then
-			other.dense = true
-			if EvilFungus.Net and not other.hidden then EvilFungus.Net.Dense(other) end
-		end
+		self:Harden(e.a == node and e.b or e.a)
 	end
 end
 
@@ -365,9 +375,31 @@ function Mat:Crowded(pos, normal, spacing)
 	return crowded
 end
 
-function Mat:Grow(from, dir, now, spacing)
+-- Crowded only by this mat's own strands that carry no body: leftovers lying where a route has to get
+-- across. Felt still blocks; that is unfolded by Demerge rather than grown over.
+function Mat:LeftoverOnly(pos, normal, spacing, body)
+	if self:Covered(pos, normal) then return false end
+	local found, live = false, false
+	self:Near(pos, spacing or SPACING, function(node)
+		if node.normal:Dot(normal) > 0.3 then
+			found = true
+			if body[node] then
+				live = true
+				return false
+			end
+		end
+	end)
+	return found and not live
+end
+
+function Mat:Grow(from, dir, now, spacing, through)
 	local pos, normal = self:Walk(from, dir, spacing and spacing * 1.5)
-	if not pos or self:Crowded(pos, normal, spacing) then return end
+	if not pos then return end
+	if self:Crowded(pos, normal, spacing) then
+		-- through is the route's body set: on a route, a landing spot held only by bodyless leftovers is grown
+		-- over anyway, so the stretch can finish and the body joins the leftovers instead of stopping at them.
+		if not (through and self:LeftoverOnly(pos, normal, spacing, through)) then return end
+	end
 	if bit.band(util.PointContents(pos + normal * 2), bit.bor(CONTENTS_WATER, CONTENTS_SLIME)) ~= 0 then return end
 
 	local node = self:Add(pos, normal, nil, nil, from.dense)

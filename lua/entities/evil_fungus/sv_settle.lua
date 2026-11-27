@@ -16,6 +16,11 @@ local DRAWN = 4
 -- Around the stretch of route being grown along. A route that starts on (or runs over) settled mat can't
 -- be grown along or counted as reached, since the patches cover the spots the points sit on.
 local ROUTE_WAKE = 64
+-- The point the mat is aiming at, which while hunting is the lead position. Settled mat around it has to open:
+-- the goal can be sitting on a patch that covers the only strands leading that way, and a locked patch cannot
+-- branch out toward a target predicted past the front. Wider than a body by the patch half, so a patch whose
+-- rim is short of the aim still opens.
+local TARGET_WAKE = 160
 -- Settled patches in a straight line on the same flat surface merge into runs of up to this many, and at
 -- most so many runs are made a pass.
 local RUN_MAX = 8
@@ -46,6 +51,7 @@ function ENT:Stirring()
 		end
 		if route.from and not route.from.dead then list[#list + 1] = { route.from.pos, ROUTE_WAKE } end
 	end
+	if self.Target then list[#list + 1] = { self.Target, TARGET_WAKE } end
 	return list
 end
 

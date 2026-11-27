@@ -17,13 +17,42 @@ local SPREAD = 0.8
 local SPREAD_MASS = 0.2
 local GROW_MASS = 1
 local GROW_COST = 0.1
+-- What a strand must hold over and above the plant price to put another one out, so it can plant again straight
+-- away instead of draining to the floor and waiting for a full unit of flow to crawl back in.
+local PLANT_RESERVE = 0.1
+-- A dense strand is the thick kind the mat hardens into structure. Putting one down costs more body than a plain
+-- strand. The cap is code, not a setting, and sits under CAP so a strand can always afford one outright with
+-- something left over -- otherwise a high growth-cost setting could price dense strands out of reach entirely.
+local DENSE_GROW_COST = 0.2
+local DENSE_COST_MAX = CAP - 0.5
 local MIN_BODY = 8
+-- Leftover cleanup is a mat-wide sweep, and it will happily eat strands a colony that small still needs to
+-- reach and regrow with. Once the body is down to a handful it stops, same as at nothing, until there's body again.
+local LEFTOVER_BODY = 10
 local REACH_RATE = 2.5
 local SPREAD_RATE = 3
 local REACH_JITTER = 0.7
 local ROUTE_JITTER = 0.4
 local SEED_RING = 8
 local DECIDE_INTERVAL = 0.25
+-- How long the goal can sit in one spot before whatever holds it has to be worth aiming at, and how far it can
+-- wander and still count as sitting in one spot -- the merge reach, since strands that close are one clump. A
+-- strand climbing through open air starts at no body and is only fed once it's on a surface, so it gets longer
+-- than the rest.
+local GOAL_GRACE = 0.2
+local GOAL_SAME = 28
+local AIR_GRACE = 3
+-- A strand that has just been fed is not bare for good, and the flat grace is far shorter than it takes body to
+-- crawl out along a long mat. Both of those buy the goal time before it is judged a scrap; TRANSIT_WAIT keeps the
+-- wait bounded so a strand nothing actually reaches still goes.
+local FED_HOLD = 0.5
+local TRANSIT_WAIT = 15
+-- How far from a spot to look for a strand the body can feed before falling back to the whole mat.
+local FEED_SCAN = 96
+-- A goal parked on settled mat wakes its own patch rather than waiting for the rouse pass to hear something stir
+-- near it, so this only stops a patch that refuses to wake (nothing of it left in the cell lookup) being asked
+-- again every tick.
+local DEMERGE_HOLD = 0.5
 local COST_WINDOW = 1
 local WANDER_TIME = { 8, 16 }
 local WANDER_RANGE = 700
@@ -60,6 +89,8 @@ local SPORE_EVERY = 45
 local SPORE_RANGE = 1200
 local SPORE_CLEAR = 300
 local SPORE_TRIES = 4
+-- How close a strand has to be to the point the spore leaves from to be the one it came out of.
+local SPORE_SOURCE = 64
 local MAX_COLONIES = 16
 local FLEE = 4
 local BURN_COST = 1e6
@@ -144,6 +175,8 @@ function ENT:Initialize()
 	local now = CurTime()
 	self.Mind = self.Mind or EvilFungus.NewMind()
 	local mat = EvilFungus.NewMat()
+	-- A patch grown from a dense spore stays dense: every strand it puts out is dense from the moment it's added.
+	if self.DenseAll then mat.dense = true end
 	self.Mat = mat
 
 	local up = self.SpawnUp or vector_up
@@ -256,26 +289,168 @@ local function Behind(node, x, y, z)
 end
 
 -- The strand nearest a point. sided discounts strands whose face looks away, so the body goes for the front
--- of something rather than the far side of it. carry skips strands with no body of their own: a piece cut
--- off from the rest still lies where it fell and is often the nearest thing to the target, but nothing can
--- be sent to it, and a goal sitting on it leaves the flow's distances with nowhere to go at all.
-function ENT:Closest(pos, sided, carry)
+-- of something rather than the far side of it. Distance is the only thing that counts: body in a strand says
+-- nothing about whether it's worth aiming at, and a bare path is still the shortest way there.
+function ENT:Closest(pos, sided)
 	local px, py, pz = pos:Unpack()
 	local function ok(n)
-		if carry and n.m <= EMPTY then return false end
 		return not sided or not Behind(n, px, py, pz)
 	end
 	local node = self.Mat:Nearest(pos, NEAR_GOAL, ok)
 	if node then return node end
 	local bestD2 = math.huge
 	for _, n in pairs(self.Mat.nodes) do
-		if not carry or n.m > EMPTY then
-			local dx, dy, dz = n.x - px, n.y - py, n.z - pz
+		local dx, dy, dz = n.x - px, n.y - py, n.z - pz
+		local d2 = dx * dx + dy * dy + dz * dz
+		if sided and Behind(n, px, py, pz) then d2 = d2 * BEHIND end
+		if d2 < bestD2 then node, bestD2 = n, d2 end
+	end
+	return node
+end
+
+-- The goal is kept honest here as the mat changes underfoot: a strand cut loose from the body, too thin to plant
+-- from, or a settled patch standing where its strands should be is judged here, not left for growth to trip over.
+-- It starts with how long the body still needs to crawl along the mat to reach a strand: the distance field is
+-- measured over the mat from every strand still carrying body, at the rate Flow pushes mass, so it is the honest
+-- answer to "is something on its way?". Nil when no strand with body can reach it at all.
+function ENT:Transit(node)
+	local d = self.Dist and self.Dist[node]
+	if not d or d <= 0 then return end
+	local rate = FLOW * EvilFungus.Setting("flow_speed")
+	if self.Hunting then rate = rate * (0.5 + 0.5 * EvilFungus.Setting("aggression")) end
+	if rate <= 0 then return end
+	return d / rate
+end
+
+-- What a strand must hold before it can plant from it: the price of the strand, plus a sliver left over. Growing
+-- off a dense strand costs more than off a plain one, so the price is the real gate; hurtilizer makes both free,
+-- leaving only the reserve.
+function ENT:CanPlant(node)
+	return node.m > self:GrowCost(node.dense) + PLANT_RESERVE
+end
+
+-- Can plant, and isn't in a state growth can't start from. The one rule the frontier scan and the goal share.
+function ENT:Frontier(node)
+	return self:CanPlant(node) and not node.burn and not node.heat
+end
+
+-- A settled patch (or a run of them) stands in for a clump of strands that no longer exist. Growing off one is a
+-- trace from its rim that crowding mostly refuses, and it only splits back into real strands when something stirs
+-- near it -- which a goal sitting on it never does. So the goal wakes its own patch: the same Wake the rouse pass
+-- uses, just heard straight away. A run splits into patches first and those into strands, so it takes two passes.
+function ENT:Demerge(node, now)
+	local mat = self.Mat
+	if not node or node.dead or not node.felt then return false end
+	if now - (self.DemergeAt or -math.huge) < DEMERGE_HOLD then return false end
+	self.DemergeAt = now
+	if not next(mat.settled) then return false end
+	local woke
+	for _ = 1, 2 do
+		if not mat:Wake(node.pos, Mat.FELT, now) then break end
+		woke = true
+	end
+	if not woke then return false end
+	self.GoalStale = true
+	return true
+end
+
+-- The nearest strand that can actually put out a new one, searched from the goal so the mat keeps working the
+-- same side of the prey. mat.full holds exactly the strands carrying body, so the scan stays on that set.
+function ENT:GrowFrom(node, now)
+	local body = now and self:Connected(now)
+	local best, bestD2, spare, spareD2
+	local px, py, pz = node.x, node.y, node.z
+	for other in pairs(self.Mat.full) do
+		if other ~= node and self:CanPlant(other) and not other.dead and not other.burn and not other.heat then
+			local dx, dy, dz = other.x - px, other.y - py, other.z - pz
 			local d2 = dx * dx + dy * dy + dz * dz
-			if sided and Behind(n, px, py, pz) then d2 = d2 * BEHIND end
-			if d2 < bestD2 then node, bestD2 = n, d2 end
+			if not spareD2 or d2 < spareD2 then spare, spareD2 = other, d2 end
+			if body and body[other] and (not bestD2 or d2 < bestD2) then best, bestD2 = other, d2 end
 		end
 	end
+	return best or spare
+end
+
+-- Whether the body can feed a strand at all. Everything joined by strands to a piece still carrying body counts,
+-- a bare front tip included, since the piece sends mass out to it. A scrap cut loose from the mat keeps whatever
+-- body it had, plants a few strands of its own and starves: nothing behind it ever sends more.
+function ENT:Feedable(node, now)
+	if not node or node.dead then return false end
+	return self:Connected(now)[node] == true
+end
+
+-- The strand nearest a spot that the body can feed, preferring the face turned toward the target. Distance alone
+-- picks scraps cut off from the mat, and a goal parked on one looks like it is on its way for a moment and then
+-- goes nowhere while strands that do have body to spare sit unfelt.
+function ENT:FeedNear(pos, now, sided)
+	local body = self:Connected(now)
+	local px, py, pz = pos:Unpack()
+	local function Front(n) return not sided or not Behind(n, px, py, pz) end
+	local node = self.Mat:Nearest(pos, FEED_SCAN, function(n) return body[n] and not n.air and Front(n) end)
+	if node then return node end
+	local best, bestD2 = nil, math.huge
+	for n in pairs(body) do
+		if not n.air and not n.dead and Front(n) then
+			local d2 = n.pos:DistToSqr(pos)
+			if d2 < bestD2 then best, bestD2 = n, d2 end
+		end
+	end
+	return best
+end
+
+-- A strand the goal has been sitting on for its grace that can't put out another strand -- a lone point, or
+-- too thin to grow from -- sends the goal to the nearest strand that can grow instead, and is only dropped when
+-- there is no such strand anywhere. Only run while hunting: on the hunt the goal is pinned to whatever is nearest
+-- the prey and can end up parked on a scrap, where roaming just picks its own way on and the mat needs every
+-- strand it has standing. The wait is stamped on the strand, but carries over to the next one when the goal only
+-- steps to a neighbour: the colony picks among the strands in one tangled clump from tick to tick, and a fresh
+-- wait on every hop is what let a bare scrap sit there for good. Returns the strand the goal should hold.
+function ENT:Leftover(node, now)
+	if not node then
+		self.GoalAt, self.GoalSince = nil, nil
+		return nil
+	end
+	-- Nothing left to lose and nothing to regrow with: once the body is down to a handful the cleanup only eats the
+	-- mat itself, so it stops until there's body again. The stamp is cleared so the wait starts fresh when it does.
+	if self.Body <= LEFTOVER_BODY then
+		node.sat = nil
+		return node
+	end
+	if not node.sat then
+		local at, since = self.GoalAt, self.GoalSince
+		node.sat = at and since and at:DistToSqr(node.pos) <= GOAL_SAME * GOAL_SAME and since or now
+	end
+	self.GoalAt, self.GoalSince = node.pos, node.sat
+	-- Air isn't judged as quickly as the rest: a strand still climbing toward the target is a new node every step,
+	-- so it keeps moving and never builds up here, while one that's stopped where nothing can reach goes once the
+	-- longer grace is up.
+	if now - node.sat <= (node.air and AIR_GRACE or GOAL_GRACE) then return node end
+	if #node.edges == 0 or not self:CanPlant(node) then
+		-- Settled mat is the scrappiest kind of holder: no live strands under it to grow from at all. Split it here
+		-- and let the next pick find the strands it turns into, instead of waiting for something to walk past.
+		if self:Demerge(node, now) then
+			self.GoalAt, self.GoalSince = nil, nil
+			return nil
+		end
+		-- Nothing here to grow from. Body still crawling out to it, or a neighbour clump just fed, earns the wait;
+		-- once nothing is on its way the goal steps to the nearest strand that can actually grow.
+		local eta = self:Transit(node)
+		if eta and now - node.sat < math.min(eta, TRANSIT_WAIT) then return node end
+		if now - (node.fed or -math.huge) < FED_HOLD then return node end
+		local grow = self:GrowFrom(node, now)
+		if grow then
+			self.GoalAt, self.GoalSince = nil, nil
+			self.GoalStale = true
+			return grow
+		end
+		-- Not a strand with body anywhere on the mat: the scrap really is all there is, so it goes.
+		self.Mat:Remove(node)
+		self.GoalAt, self.GoalSince = nil, nil
+		self.GoalStale = true
+		return nil
+	end
+	node.sat = nil
+	self.GoalAt, self.GoalSince = nil, nil
 	return node
 end
 
@@ -448,9 +623,19 @@ function ENT:Decide(now)
 	self.Tending = not self.Hunting and self:Patient() or nil
 	if self.Hunting then
 		self.Target = known and self:Lead(prey, now) or self.PreyFrom or node.pos
-		goal = self:Closest(self.Target, true, true) or node
-		self.PreyNode = goal
+		-- Nearest to the prey, but only among strands the body is joined to. A scrap cut off from the mat can lie
+		-- nearer without ever being fed, so aiming at it makes no progress and the cross sits there.
+		goal = self:FeedNear(self.Target, now, true) or self:Closest(self.Target, true) or node
 		goal = self:Around(goal, now)
+		-- A strand can still be too thin to plant from even on the body; that is judged here rather than left for
+		-- the roam branch to find, since on the hunt the goal is pinned to whatever is nearest the prey. Leftover
+		-- can cull the strand it was handed and answer with none, so the pick falls back on the one the mat stands
+		-- on: there is always a goal while there is a mat.
+		if not self:Leftover(goal, now) then
+			goal = self:FeedNear(self.Target, now, true) or self:Closest(self.Target, true) or node
+		end
+		-- After Leftover, so it names the strand the goal ends up on and not the one it was moved off.
+		self.PreyNode = goal
 	elseif self.Tending then
 		goal = self.Tending.nest
 		self.Target, self.Waypoint = goal.pos, nil
@@ -469,8 +654,10 @@ function ENT:Decide(now)
 		end
 		if not self.Target or now >= self.TargetUntil then self:PickTarget(now) end
 		goal = self.Goal
-		if self.GoalStale or not goal or goal.dead then
-			goal = self:Closest(self.Target, true, true)
+		-- A goal left on a piece that has since drained or been cut loose can never be fed again, so it is re-picked
+		-- even when nothing else has marked it stale.
+		if self.GoalStale or not goal or goal.dead or not self:Feedable(goal, now) then
+			goal = self:FeedNear(self.Target, now, true) or self:Closest(self.Target, true)
 			self.GoalStale = false
 		end
 		goal = self:Around(goal, now)
@@ -621,6 +808,7 @@ function ENT:Flow(dt, now, rate)
 					local other = e.a == node and e.b or e.a
 					if (other.burn and 2 or other.heat or 0) < heat and not other.asleep then
 						SetMass(mat, other, other.m + q)
+						other.fed = now
 						m = m - q
 					end
 				end
@@ -633,12 +821,14 @@ function ENT:Flow(dt, now, rate)
 				local e = edges[j]
 				local other = e.a == node and e.b or e.a
 				local od = dist[other]
-				if od and od < d and other.m < CAP and not other.burn and not other.heat and not other.asleep then d, down, to = od, e, other end
+				if od and od < d and other.m < CAP and not other.burn and not other.heat and not other.asleep then
+					d, down, to = od, e, other end
 			end
 			if down then
 				local q = m * math.min(0.9, rate * Conductance(mat, down, now) / down.len * dt)
 				m = m - q
 				SetMass(mat, to, to.m + q)
+				to.fed = now
 				Thicken(mat, down, q, now)
 			end
 			if m > SPREAD_MASS then
@@ -650,6 +840,7 @@ function ENT:Flow(dt, now, rate)
 						local q = (m - om) * spread
 						m = m - q
 						SetMass(mat, other, om + q)
+						other.fed = now
 					end
 				end
 			end
@@ -660,6 +851,7 @@ end
 
 function ENT:Slump(dt)
 	local mat = self.Mat
+	local now = CurTime()
 	local n = 0
 	for node in pairs(mat.full) do
 		n = n + 1
@@ -687,10 +879,6 @@ function ENT:Slump(dt)
 	end
 end
 
-local function Frontier(node)
-	return node.m > GROW_MASS and not node.burn and not node.heat
-end
-
 -- The newest catch still within reach of rescue. The body goes and sits with it.
 function ENT:Patient()
 	local best
@@ -704,23 +892,34 @@ function ENT:Patient()
 	return best
 end
 
-function ENT:Sprout(from, dir, now, spacing, payer, rise, catch)
+-- One plant off a strand. opts holds everything that varies between calls:
+--   now      the clock it's planted at
+--   spacing  step length for the walk, when it isn't the mat's own
+--   payer    the strand that pays, when it isn't the one growing
+--   rise     climb off the surface instead of growing along it
+--   catch    ragdoll to weave the new strand onto
+--   through  body set a route may grow over its own leftovers with
+function ENT:Sprout(from, dir, opts)
+	local now = opts.now
 	if from.burn or from.heat then return end
-	payer = payer or from
-	local cost = EvilFungus.Setting("hurtilizer") > 0 and 0 or GROW_COST * EvilFungus.Setting("grow_cost")
+	local payer = opts.payer or from
+	local cost = self:GrowCost(from.dense)
 	if payer.m < cost or (EvilFungus.SproutsLeft or 1) <= 0 then return end
 	EvilFungus.SproutsLeft = (EvilFungus.SproutsLeft or 1) - 1
 	local node
-	if rise then
+	if opts.rise then
 		node = self.Mat:Rise(from, dir, now)
 	elseif from.felt then
 		node = self.Mat:Bud(from, dir, now)
+		-- A refused trace off a patch is usually the patch standing where the strands should be: wake it so the
+		-- growth actually has strands to come out of on the next try.
+		if not node then self:Demerge(from, now) end
 	else
-		node = self.Mat:Grow(from, dir, now, spacing)
+		node = self.Mat:Grow(from, dir, now, opts.spacing, opts.through)
 	end
 	if not node then return end
 	if cost > 0 then self.Mat:SetMass(payer, payer.m - cost) end
-	if catch then self.Mat:Weave(node, catch) end
+	if opts.catch then self.Mat:Weave(node, opts.catch) end
 	local goal, target = self.Goal, self.Waypoint or self.Target
 	if not self.Hunting and goal and target and node.pos:DistToSqr(target) < goal.pos:DistToSqr(target) then
 		self.Goal = node
@@ -729,9 +928,13 @@ function ENT:Sprout(from, dir, now, spacing, payer, rise, catch)
 	return node
 end
 
--- What one plant costs in body. Zero when hurtilizer is on, which makes the mat grow free.
-function ENT:GrowCost()
-	return EvilFungus.Setting("hurtilizer") > 0 and 0 or GROW_COST * EvilFungus.Setting("grow_cost")
+-- What one plant costs in body. Zero when hurtilizer is on, which makes the mat grow free. A dense strand
+-- costs DENSE_GROW_COST instead, up to DENSE_COST_MAX.
+function ENT:GrowCost(dense)
+	if EvilFungus.Setting("hurtilizer") > 0 then return 0 end
+	local setting = EvilFungus.Setting("grow_cost")
+	if dense then return math.min(DENSE_GROW_COST * setting, DENSE_COST_MAX) end
+	return GROW_COST * setting
 end
 
 -- Puts a strand right on a route point from a strand that can see it, paid for like any other. The
@@ -741,7 +944,7 @@ function ENT:Leap(from, pos, normal, now, pay)
 	if from.burn or from.heat or from.air then return end
 	local mat = self.Mat
 	if EvilFungus.Strands() >= EvilFungus.Setting("max_nodes") or self.Limit and mat.count - mat.wovenCount >= self.Limit then return end
-	local cost = self:GrowCost()
+	local cost = self:GrowCost(from.dense)
 	local payer = pay or from
 	if payer.m < cost or (EvilFungus.SproutsLeft or 1) <= 0 then return end
 	local node = self.Mat:Leap(from, pos, normal, now, true)
@@ -888,7 +1091,7 @@ function ENT:Spread(dt, now)
 		frontier = {}
 		for _, t in ipairs(targets) do t.best, t.d2 = nil, math.huge end
 		for node in pairs(mat.full) do
-			if Frontier(node) then
+			if self:Frontier(node) then
 				if not node.air then frontier[#frontier + 1] = node end
 				for _, t in ipairs(targets) do
 					if t.tunnel > 0 or not node.air then
@@ -907,7 +1110,7 @@ function ENT:Spread(dt, now)
 		self.ReachDebt = self.ReachDebt - 1
 		self.ReachTurn = self.ReachTurn % #targets + 1
 		local t = targets[self.ReachTurn]
-		if not frontier or t.best and not Frontier(t.best) then Scan() end
+		if not frontier or t.best and not self:Frontier(t.best) then Scan() end
 		local best, target, tunnel, d2 = t.best, t.pos, t.tunnel, t.d2
 		local routed = t == targets[1] and self.Route and self:RouteFrom(now)
 		if routed then best, d2 = routed, routed.pos:DistToSqr(target) end
@@ -918,8 +1121,11 @@ function ENT:Spread(dt, now)
 			-- On a route the points are close together and the wander would only pull it off them.
 			if t == targets[1] and self.Route then jitter = jitter * ROUTE_JITTER end
 			local dir = (target - best.pos):GetNormalized() + VectorRand() * jitter
-			local grown = rise and self:Sprout(best, dir, now, nil, nil, true)
-			if not grown and not self.Absorbed then grown = self:Sprout(best, dir, now) end
+			-- A route may grow over its own leftovers rather than being refused by them; greedy growth has no way
+			-- through set and keeps its old refusal, so it does not double up on dead mat either.
+			local through = routed and self:Connected(now) or nil
+			local grown = rise and self:Sprout(best, dir, { now = now, rise = true, through = through })
+			if not grown and not self.Absorbed then grown = self:Sprout(best, dir, { now = now, through = through }) end
 			if self.Absorbed then return end
 			if routed then self:RouteStep(routed, grown, now) end
 		end
@@ -931,9 +1137,9 @@ function ENT:Spread(dt, now)
 		local from
 		for _ = 1, #frontier do
 			local i = math.random(#frontier)
-			if Frontier(frontier[i]) then from = frontier[i] break end
+			if self:Frontier(frontier[i]) then from = frontier[i] break end
 		end
-		if from then self:Sprout(from, VectorRand(), now) end
+		if from then self:Sprout(from, VectorRand(), { now = now }) end
 		if self.Absorbed then return end
 	end
 
@@ -949,12 +1155,13 @@ function ENT:Weave(dt, now, speed)
 	end
 	local cap = math.min(SPROUTS_PER_TICK, DEBT_CAP * math.max(1, EvilFungus.TimeScale()))
 	self.WeaveDebt = math.min(cap, self.WeaveDebt + WEAVE_RATE * speed * dt)
+	local opts = { now = now, spacing = WEAVE_SPACING, payer = s.nest, catch = s.rag }
 	while self.WeaveDebt >= 1 and (s.woven or 0) < WEAVE_MAX do
 		self.WeaveDebt = self.WeaveDebt - 1
 		local near = {}
 		self.Mat:Near(s.nest.pos, WEAVE_RADIUS, function(node) near[#near + 1] = node end)
 		if #near == 0 then return end
-		if self:Sprout(near[math.random(#near)], VectorRand(), now, WEAVE_SPACING, s.nest, nil, s.rag) then
+		if self:Sprout(near[math.random(#near)], VectorRand(), opts) then
 			s.woven = (s.woven or 0) + 1
 		end
 		if self.Absorbed then return end
@@ -1004,13 +1211,18 @@ function EvilFungus.Taken(pos, clear)
 end
 local Taken = EvilFungus.Taken
 
--- A new patch on the ground at pos, starting with that much body and thinking with that mind.
-function EvilFungus.Plant(pos, normal, mass, mind, creator, limit)
+-- A new patch on the ground at pos. opts:
+--   mass     the body it starts with
+--   mind     the mind it thinks with
+--   creator  who gets the credit for it
+--   limit    cap on unsettled strands
+--   dense    the whole patch comes out dense, since the spore left a dense strand
+function EvilFungus.Plant(pos, normal, opts)
 	local spore = ents.Create("evil_fungus")
 	if not IsValid(spore) then return end
 	spore:SetPos(pos + normal * 4)
-	spore.SpawnAt, spore.SpawnUp, spore.StartMass = pos, normal, mass
-	spore.Mind, spore.Limit = mind, limit
+	spore.SpawnAt, spore.SpawnUp, spore.StartMass = pos, normal, opts.mass
+	spore.Mind, spore.Limit, spore.DenseAll = opts.mind, opts.limit, opts.dense
 	spore:Spawn()
 	spore:Activate()
 	Own(spore, creator)
@@ -1036,11 +1248,12 @@ function ENT:Spend(mass)
 	self.Body = self.Body * keep
 end
 
-function ENT:Throw(from, dir)
+function ENT:Throw(from, dir, dense)
 	local tr = util.TraceLine({ start = from, endpos = from + dir * SPORE_RANGE, mask = MASK_SOLID_BRUSHONLY })
 	if not tr.HitWorld or tr.HitSky or tr.HitNoDraw or tr.StartSolid or tr.Fraction <= 0.2 or Taken(tr.HitPos) then return false end
 	local mass = self.Body * SPORE_SHARE
-	if not EvilFungus.Plant(tr.HitPos, tr.HitNormal, mass, self.Mind, self:GetCreator()) then return true end
+	local opts = { mass = mass, mind = self.Mind, creator = self:GetCreator(), dense = dense }
+	if not EvilFungus.Plant(tr.HitPos, tr.HitNormal, opts) then return true end
 	self:Spend(mass)
 
 	local fx = EffectData()
@@ -1065,17 +1278,20 @@ function ENT:Spores(dt)
 	if not EvilFungus.Room() then return end
 
 	local from = self.Center + self.Up * 24
+	-- Note the strand it pushes out of: a spore off a dense one grows a patch that's dense throughout.
+	local src = self.Mat:Nearest(from, SPORE_SOURCE)
+	local dense = src and src.dense
 	local prey = self.Hunting and self.Smelled == self.Prey and self.Prey
 	local at = IsValid(prey) and self.Target
 	if at and from:DistToSqr(at) < SPORE_RANGE * SPORE_RANGE
-		and self:Throw(from, (at - from):GetNormalized()) then
+		and self:Throw(from, (at - from):GetNormalized(), dense) then
 		return
 	end
 	for _ = 1, SPORE_TRIES do
 		local dir = VectorRand()
 		dir.z = math.abs(dir.z) * 0.5 + 0.2
 		dir:Normalize()
-		if self:Throw(from, dir) then return end
+		if self:Throw(from, dir, dense) then return end
 	end
 end
 

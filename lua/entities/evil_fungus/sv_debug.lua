@@ -3,9 +3,11 @@ local DRAW_RANGE = 2500
 local LIFT = 2
 local WAVE_BAND = 16
 local D_SHOWN = 6
+local FED_DRAW = 0.3
 local DRAW_MAX = 3000
 
 local MASS = Color(240, 160, 40)
+local FED = Color(60, 220, 255)
 local WAVE = Color(40, 220, 170)
 local GOAL = Color(255, 0, 255)
 local TARGET = Color(255, 255, 255)
@@ -52,6 +54,10 @@ function ENT:DebugDraw(now)
 
 	for node in pairs(mat.full) do
 		debugoverlay.Cross(node.pos + node.normal * (LIFT + 1), 1 + math.sqrt(node.m) * 3, life, MASS, true)
+		-- Body that actually moved into this strand in the last moment: the visible wavefront of the flow.
+		if node.fed and now - node.fed < FED_DRAW then
+			debugoverlay.Cross(node.pos + node.normal * (LIFT + 2), 3, life, FED, true)
+		end
 	end
 
 	for _, w in ipairs(self.Waves) do
@@ -91,4 +97,16 @@ function ENT:DebugDraw(now)
 	local knows = {}
 	for tactic in SortedPairs(EvilFungus.TACTICS) do knows[#knows + 1] = ("%s %.2f"):format(tactic, mind:Knows(tactic)) end
 	debugoverlay.EntityTextAtPosition(at, 3, "knows  " .. table.concat(knows, "  "), life, TARGET)
+	local goal = self.Goal
+	if goal and not goal.dead then
+		debugoverlay.EntityTextAtPosition(at, 5, ("goal  body %.2f  air %s  felt %s  edges %d  held %.1f"):format(
+			goal.m, goal.air and "yes" or "no", goal.felt and "yes" or "no", #goal.edges,
+			goal.sat and math.max(0, CurTime() - goal.sat) or 0), life, TARGET)
+		local eta = self.Transit and self:Transit(goal)
+		local d = self.Dist and self.Dist[goal]
+		debugoverlay.EntityTextAtPosition(at, 6, ("flow  dist %s  eta %s  fed %s"):format(
+			d and ("%.0f"):format(d) or "none",
+			eta and ("%.1fs"):format(eta) or "-",
+			goal.fed and ("%.2fs ago"):format(now - goal.fed) or "no"), life, TARGET)
+	end
 end

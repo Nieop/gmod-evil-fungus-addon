@@ -11,6 +11,9 @@ local LEAP = 0.1
 local LEAP_RADIUS = 48
 local SCORCH = 0.15
 local CUT_RADIUS = 12
+-- A dense strand is hardened: a hit only takes it when it lands within this much of a normal strand's reach, so
+-- bullets and blasts have to be on the mark rather than near it.
+local DENSE_HIT = 0.25
 local BLAST_KILL = 0.6
 local BLAST_MAGNITUDE = 100
 local BLAST_GAP = 0.3
@@ -90,7 +93,9 @@ local function Spark(src)
 end
 
 function Harm.Ignite(colony, node, now, fire)
-	if not FireOn() or node.burn or node.dead then return end
+	-- A dense strand is hardened all the way through and doesn't take fire at all, so it never enters the burning
+	-- set and never burns away.
+	if not FireOn() or node.burn or node.dead or node.dense then return end
 	if fire then
 		if fire.left <= 0 then return end
 		fire.left = fire.left - 1
@@ -123,7 +128,10 @@ function Harm.Cut(pos, radius)
 	for _, colony in ipairs(Around(pos, radius)) do
 		local hit = {}
 		colony.Mat:Wake(pos, radius, now)
-		colony.Mat:Near(pos, radius, function(node) hit[#hit + 1] = node end)
+		colony.Mat:Near(pos, radius, function(node, d2)
+			local reach = node.dense and radius * DENSE_HIT or radius
+			if d2 <= reach * reach then hit[#hit + 1] = node end
+		end)
 		for _, node in ipairs(hit) do Kill(colony, node) end
 	end
 end
@@ -135,7 +143,6 @@ function Harm.Blast(pos, radius)
 	local now = CurTime()
 	if lastBlast and now - lastBlastAt < BLAST_GAP and lastBlast:DistToSqr(pos) < radius * radius then return end
 	lastBlast, lastBlastAt = pos, now
-	local kill2 = (radius * BLAST_KILL) ^ 2
 	local fire = Spark()
 	for _, colony in ipairs(Around(pos, radius)) do
 		local hit = {}
@@ -143,8 +150,11 @@ function Harm.Blast(pos, radius)
 		colony.Mat:Near(pos, radius, function(node, d2) hit[#hit + 1] = { node, d2 } end)
 		for _, h in ipairs(hit) do
 			local node, d2 = h[1], h[2]
-			if Clear(pos, node) then
-				if d2 < kill2 then Kill(colony, node, true) else Harm.Ignite(colony, node, now, fire) end
+			-- Hardened strands only give way to a blast that lands on them, a quarter of the blast's reach in,
+			-- and are only set alight from that close either.
+			local edge = node.dense and radius * DENSE_HIT or radius
+			if d2 <= edge * edge and Clear(pos, node) then
+				if d2 < (edge * BLAST_KILL) ^ 2 then Kill(colony, node, true) else Harm.Ignite(colony, node, now, fire) end
 			end
 		end
 	end

@@ -152,7 +152,7 @@ net.Receive("EvilFungusBody", function()
 end)
 
 -- A strand torn out hardens its neighbours, so the server names whichever strands turned dense. Their
--- chunks are built again with the darker colour, and the body cells that hold them too.
+-- chunks are built again in the brown-red, and the body cells that hold them too.
 net.Receive("EvilFungusDense", function()
 	for _ = 1, net.ReadUInt(12) do
 		local node = M.nodes[net.ReadUInt(24)]

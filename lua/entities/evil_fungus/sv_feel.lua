@@ -12,7 +12,9 @@ local STILL_SPEED = 5
 local FEEL_MASS = 0.3
 local GRIP_RADIUS = 48
 local DRAG_MASS = { 1, 8 }
-local GRAB_MASS = 2.5
+-- Body that has to be lying on something before the fibers count as on it at all. Above this the grip scales
+-- with how much of the mat is there; below it there is nothing there worth calling a grip.
+local GRAB_MIN = 0.6
 local DOSE_MASS = 4
 local SLEEPER_RADIUS = 56
 local BREATH_GAIN = 0.15
@@ -469,7 +471,7 @@ function ENT:Feed(ent, node, dt)
 		self.Dragged[ent] = drag > 0 or nil
 	end
 
-	if m < GRAB_MASS then return end
+	if m < GRAB_MIN then return end
 	if ent == self.Prey then self.Eating = true end
 	local dose = dt / math.max(0.1, EvilFungus.Setting("sleep_time")) * math.Clamp(m / DOSE_MASS, 0.5, 2)
 	if EvilFungus.Sedate(ent, dose, self) and ent == self.Prey then self.Eating = nil end
@@ -508,7 +510,7 @@ function ENT:Digest(ent, node, dt)
 	local mat = self.Mat
 	local m = 0
 	mat:Near(ent:GetPos(), GRIP_RADIUS, function(n) m = m + n.m end)
-	if m < GRAB_MASS then return end
+	if m < GRAB_MIN then return end
 	if ent:GetClass() == "prop_ragdoll" then
 		if ent == self.Prey then self.Eating = nil end
 		EvilFungus.Sleep.Wrap(ent, self)

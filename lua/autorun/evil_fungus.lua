@@ -88,6 +88,7 @@ else
 	resource.AddFile("materials/evil_fungus/flesh.vtf")
 	resource.AddFile("materials/evil_fungus/fiber.vtf")
 	resource.AddFile("materials/evil_fungus/web.vtf")
+	resource.AddFile("materials/evil_fungus/dense.vtf")
 	resource.AddFile("materials/killicons/evil_fungus.png")
 	include("evil_fungus/sv_creatures.lua")
 	include("evil_fungus/sv_mind.lua")

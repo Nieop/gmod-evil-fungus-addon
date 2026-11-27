@@ -14,6 +14,9 @@ end
 
 local MAT = Skin("evil_fungus_fiber", "evil_fungus/fiber", "[.3 .28 .24]")
 local FLESH = Skin("evil_fungus_flesh", "evil_fungus/flesh", "[.75 .7 .72]")
+local DENSE = Skin("evil_fungus_dense", "evil_fungus/dense", "[.22 .19 .16]")
+-- The dense skin is grey stone, so its vertex colours are pulled down into the mat's dark brown-red.
+local DENSE_TINT = { 0.62, 0.34, 0.26 }
 
 local LEVELS = 15
 local SEGMENTS = 2
@@ -41,7 +44,6 @@ local BODY_SHOW = 6
 local BODY_GONE = 0.01
 local PULSE, PULSE_RATE, PULSE_SPREAD = 0.15, 2.5, 0.9
 local SHADE_LOW = 0.55
-local DENSE_SHADE = 0.5
 local TEX_STRETCH = 1.4
 local WEB_HALF = 40
 local WEB_FULL = 10
@@ -300,8 +302,9 @@ local function Polyline(pts, radii, up, sides, cr, cg, cb, light)
 end
 
 EvilFungus.Strands = {
-	Polyline = Polyline, Light = Light, MAT = MAT, FLESH = FLESH,
+	Polyline = Polyline, Light = Light, MAT = MAT, FLESH = FLESH, DENSE = DENSE,
 	ROOT = ROOT, VEIN = VEIN, BODY_THIN = BODY_THIN, BODY_THICK = BODY_THICK,
+	DENSE_TINT = DENSE_TINT,
 }
 
 local function Radius(e)
@@ -371,6 +374,18 @@ local function Lay(web)
 	end
 end
 
+-- One mesh for one skin: the strands are split by which skin they wear and each list is built the same
+-- way. A draw call that fails partway still leaves the mesh, so the rest of the chunk keeps showing.
+local function BuildMesh(quads, material, label, build)
+	if quads <= 0 then return nil end
+	local im = Mesh(material)
+	mesh.Begin(im, MATERIAL_QUADS, quads)
+	local ok, err = pcall(build)
+	mesh.End()
+	if not ok then ErrorNoHalt("Evil Fungus couldn't build " .. label .. ": ", err, "\n") end
+	return im
+end
+
 local function Build(chunk)
 	if chunk.mesh then
 		chunk.mesh:Destroy()
@@ -379,6 +394,10 @@ local function Build(chunk)
 	if chunk.webMesh then
 		chunk.webMesh:Destroy()
 		chunk.webMesh = nil
+	end
+	if chunk.denseMesh then
+		chunk.denseMesh:Destroy()
+		chunk.denseMesh = nil
 	end
 	if chunk.count <= 0 then
 		EvilFungus.Client.chunks[chunk.key] = nil
@@ -399,41 +418,46 @@ local function Build(chunk)
 			flat = flat + web.quads
 		end
 	end
-	if flat > 0 then
-		local im = Mesh(WEB)
-		mesh.Begin(im, MATERIAL_QUADS, flat)
-		local ok, err = pcall(function()
-			for _, web in ipairs(webs) do Lay(web) end
-		end)
-		mesh.End()
-		if not ok then ErrorNoHalt("Evil Fungus couldn't build a settled chunk: ", err, "\n") end
-		chunk.webMesh = im
-	end
+	chunk.webMesh = BuildMesh(flat, WEB, "a settled chunk", function()
+		for _, web in ipairs(webs) do Lay(web) end
+	end)
 
-	local list, quads, tube = {}, 0, SEGMENTS * ROOT_SIDES
+	local list, dense, quads, denseQuads, tube = {}, {}, 0, 0, SEGMENTS * ROOT_SIDES
 	for e in pairs(chunk.edges) do
-		if #list >= MAX_CHUNK_EDGES or quads + tube > MAX_CHUNK_QUADS then break end
+		if #list + #dense >= MAX_CHUNK_EDGES or quads + denseQuads + tube > MAX_CHUNK_QUADS then break end
 		if not (e.a.felt or e.b.felt) or e.level >= VEIN_SHOWN then
-			list[#list + 1] = e
-			quads = quads + tube
+			if e.a.dense or e.b.dense then
+				dense[#dense + 1] = e
+				denseQuads = denseQuads + tube
+			else
+				list[#list + 1] = e
+				quads = quads + tube
+			end
 		end
 	end
-	if quads <= 0 then return end
 
-	local im = Mesh(MAT)
-	mesh.Begin(im, MATERIAL_QUADS, quads)
-	local ok, err = pcall(function()
+	chunk.mesh = BuildMesh(quads, MAT, "a mat chunk", function()
 		for _, e in ipairs(list) do
 			local k = e.level / LEVELS
-			local tint = (0.9 + 0.2 * Hash(e.eid + 7)) * ((e.a.dense or e.b.dense) and DENSE_SHADE or 1)
+			local jitter = 0.9 + 0.2 * Hash(e.eid + 7)
 			local r = Radius(e)
 			Tube(e, r, r * TAPER, ROOT_SIDES,
-				Lerp(k, ROOT[1], VEIN[1]) * tint, Lerp(k, ROOT[2], VEIN[2]) * tint, Lerp(k, ROOT[3], VEIN[3]) * tint, nil, true)
+				Lerp(k, ROOT[1], VEIN[1]) * jitter, Lerp(k, ROOT[2], VEIN[2]) * jitter,
+				Lerp(k, ROOT[3], VEIN[3]) * jitter, nil, true)
 		end
 	end)
-	mesh.End()
-	if not ok then ErrorNoHalt("Evil Fungus couldn't build a mat chunk: ", err, "\n") end
-	chunk.mesh = im
+
+	chunk.denseMesh = BuildMesh(denseQuads, DENSE, "a dense chunk", function()
+		for _, e in ipairs(dense) do
+			local k = e.level / LEVELS
+			local jitter = 0.9 + 0.2 * Hash(e.eid + 7)
+			local r = Radius(e)
+			Tube(e, r, r * TAPER, ROOT_SIDES,
+				Lerp(k, ROOT[1], VEIN[1]) * jitter * DENSE_TINT[1],
+				Lerp(k, ROOT[2], VEIN[2]) * jitter * DENSE_TINT[2],
+				Lerp(k, ROOT[3], VEIN[3]) * jitter * DENSE_TINT[3], nil, true)
+		end
+	end)
 end
 
 -- Only so long a frame goes on rebuilding the mat. Whatever's left waits for the next one.
@@ -452,11 +476,13 @@ local pass = {}
 local candidates = {}
 local cells, cellCount = {}, 0
 
-local function BodyEdge(e, ra, rb, sides, segments)
+local function BodyEdge(e, ra, rb, sides, segments, tint)
 	local k = math.Clamp((e.a.shown + e.b.shown) / 8, 0, 1)
-	local dim = (e.a.dense or e.b.dense) and DENSE_SHADE or 1
+	local tr, tg, tb = 1, 1, 1
+	if tint then tr, tg, tb = tint[1], tint[2], tint[3] end
 	Tube(e, ra, rb, sides,
-		Lerp(k, BODY_THIN[1], BODY_THICK[1]) * dim, Lerp(k, BODY_THIN[2], BODY_THICK[2]) * dim, Lerp(k, BODY_THIN[3], BODY_THICK[3]) * dim, segments)
+		Lerp(k, BODY_THIN[1], BODY_THICK[1]) * tr, Lerp(k, BODY_THIN[2], BODY_THICK[2]) * tg,
+		Lerp(k, BODY_THIN[3], BODY_THICK[3]) * tb, segments)
 end
 
 -- How far a strand bows away from straight at its middle.
@@ -529,6 +555,10 @@ local function ForgetBody(cell)
 		cell.bodyMesh:Destroy()
 		cell.bodyMesh = nil
 	end
+	if cell.bodyDenseMesh then
+		cell.bodyDenseMesh:Destroy()
+		cell.bodyDenseMesh = nil
+	end
 	cell.bodyBuilt = nil
 end
 
@@ -544,7 +574,7 @@ local function BakeBody(cell)
 	-- A strand whose bow would be lost inside its own thickness is drawn straight.
 	local sides, most = cell.lod[2], cell.lod[3]
 	local t = RealTime() * PULSE_RATE * EvilFungus.Setting("pulse_speed")
-	local quads = 0
+	local quads, denseQuads = 0, 0
 	for i = 1, n do
 		local e = list[i]
 		local a, b = e.a, e.b
@@ -553,17 +583,28 @@ local function BakeBody(cell)
 		local rb = base + BODY_R * math.sqrt(b.shown) * (1 + PULSE * math.sin(t + b.nid * PULSE_SPREAD))
 		local segments = most > 1 and Bow(e) < STRAIGHT * math.min(ra, rb) and 1 or most
 		bodyRa[i], bodyRb[i], bodySegments[i] = ra, rb, segments
-		quads = quads + sides * segments
+		if a.dense or b.dense then
+			denseQuads = denseQuads + sides * segments
+		else
+			quads = quads + sides * segments
+		end
 	end
 
-	local im = Mesh(FLESH)
-	mesh.Begin(im, MATERIAL_QUADS, quads)
-	local ok, err = pcall(function()
-		for i = 1, n do BodyEdge(list[i], bodyRa[i], bodyRb[i], sides, bodySegments[i]) end
+	cell.bodyMesh = BuildMesh(quads, FLESH, "its body", function()
+		for i = 1, n do
+			local e = list[i]
+			if not (e.a.dense or e.b.dense) then BodyEdge(e, bodyRa[i], bodyRb[i], sides, bodySegments[i]) end
+		end
 	end)
-	mesh.End()
-	if not ok then ErrorNoHalt("Evil Fungus couldn't build its body: ", err, "\n") end
-	cell.bodyMesh = im
+
+	cell.bodyDenseMesh = BuildMesh(denseQuads, DENSE, "its dense body", function()
+		for i = 1, n do
+			local e = list[i]
+			if e.a.dense or e.b.dense then
+				BodyEdge(e, bodyRa[i], bodyRb[i], sides, bodySegments[i], DENSE_TINT)
+			end
+		end
+	end)
 end
 
 -- Which strands are body worth drawing, and where. What the server says about the body only changes a few times a second.
@@ -638,6 +679,11 @@ local function DrawBody(eye, main)
 	render.SetMaterial(FLESH)
 	for i = 1, cellCount do
 		local im = cells[i].bodyMesh
+		if im then im:Draw() end
+	end
+	render.SetMaterial(DENSE)
+	for i = 1, cellCount do
+		local im = cells[i].bodyDenseMesh
 		if im then im:Draw() end
 	end
 end
@@ -738,6 +784,10 @@ EvilFungus.DrawPass("EvilFungusRender", function(main)
 	render.SetMaterial(MAT)
 	for _, chunk in pairs(EvilFungus.Client.chunks) do
 		if chunk.mesh and chunk.center:DistToSqr(from) < (chunk.cull or r2) then chunk.mesh:Draw() end
+	end
+	render.SetMaterial(DENSE)
+	for _, chunk in pairs(EvilFungus.Client.chunks) do
+		if chunk.denseMesh and chunk.center:DistToSqr(from) < (chunk.cull or r2) then chunk.denseMesh:Draw() end
 	end
 	render.SetMaterial(WEB)
 	for _, chunk in pairs(EvilFungus.Client.chunks) do

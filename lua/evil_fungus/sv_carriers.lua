@@ -64,7 +64,8 @@ end
 local function Plant(from, pos, normal, spore, clear)
 	if not EvilFungus.Room() or EvilFungus.Taken(pos, clear) then return false end
 	if bit.band(util.PointContents(pos + normal * 2), WATER) ~= 0 then return false end
-	if not EvilFungus.Plant(pos, normal, spore.mass, spore.mind, spore.creator) then return false end
+	local opts = { mass = spore.mass, mind = spore.mind, creator = spore.creator }
+	if not EvilFungus.Plant(pos, normal, opts) then return false end
 	local fx = EffectData()
 	fx:SetStart(from)
 	fx:SetOrigin(pos)

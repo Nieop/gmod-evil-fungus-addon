@@ -323,7 +323,7 @@ end
 local function Plant(h, from, pos, normal, mass, clear)
 	if not EvilFungus.Room() or EvilFungus.Taken(pos, clear) then return false end
 	if bit.band(util.PointContents(pos + normal * 2), WATER) ~= 0 then return false end
-	if not EvilFungus.Plant(pos, normal, mass, h.mind, h.creator) then return false end
+	if not EvilFungus.Plant(pos, normal, { mass = mass, mind = h.mind, creator = h.creator }) then return false end
 	local fx = EffectData()
 	fx:SetStart(from)
 	fx:SetOrigin(pos)
@@ -835,6 +835,10 @@ function Hosts.Rise(s, tether)
 	EvilFungus.Foods[rag] = nil
 	rag:SetCollisionGroup(COLLISION_GROUP_WEAPON)
 	rag:SetNW2Int(EvilFungus.STAGE_VAR, HOST)
+	-- Same skin that took it: judge the mat at the nest again, since the host may rise long after the capture.
+	if EvilFungus.Sleep.MostlyDense then
+		rag:SetNW2Bool(EvilFungus.DENSE_VAR, EvilFungus.Sleep.MostlyDense(colony and colony.Mat, s.nest and s.nest.pos))
+	end
 
 	local now = CurTime()
 	local h = {

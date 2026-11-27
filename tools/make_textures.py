@@ -163,6 +163,47 @@ def fiber():
     return col, wet
 
 
+def spots(freq, thresh):
+    """Irregular aggregate chip: band-passed noise cut at `thresh`, edges antialiased."""
+    n = fbm(freq, 3)
+    return np.clip((n - thresh) / 0.14, 0, 1)
+
+
+def dense():
+    """The hardened skin: pale granite packed with coarse dark aggregate.
+
+    Baked for one tile per strand circumference, so the chips keep their size on the strand.
+    """
+    big = spots(9, 1.22)      # ~55 px stones
+    mid = spots(21, 1.34)     # ~24 px chips
+    fine = spots(46, 1.52)    # ~11 px grit
+    dust = spots(95, 1.62)    # ~5 px pinpricks
+    chip = np.clip(big + mid * 0.85 + fine * 0.6 + dust * 0.45, 0, 1)
+
+    height = chip * 0.30 + fbm(20, 3) * 0.10 + fbm(80, 2) * 0.035
+    cavity = norm(np.clip(height - blur(height, 7), -0.4, 0.4))
+    rim = np.clip((chip - blur(chip, 1.6)) * 6, -1, 1)   # +1 just outside a chip, -1 just inside
+
+    grain = fbm(130, 2)
+    fleck = np.clip((fbm(48, 2) - 2.05) / 0.45, 0, 1)
+    pores = np.clip((fbm(150, 1) - 2.30) / 0.4, 0, 1)
+    mottle = 1.0 + 0.10 * np.clip(fbm(12, 3) * 0.5, -1, 1) + 0.05 * np.clip(fbm(34, 2) * 0.5, -1, 1)
+
+    matrix = np.array([0.560, 0.584, 0.610]) * np.clip(mottle, 0.7, 1.3)[..., None]
+    dark = np.array([0.034, 0.036, 0.040]) * (0.9 + 1.2 * np.clip(fbm(30, 2) * 0.35, 0, 1))[..., None]
+    col = matrix * (1 - chip[..., None]) + dark * chip[..., None]
+
+    col *= (0.86 + 0.20 * cavity)[..., None]
+    col += np.clip(rim, 0, 1)[..., None] * 0.05 - np.clip(-rim, 0, 1)[..., None] * 0.06
+    col = col * (1 - pores[..., None] * chip[..., None] * 0.30) + fleck[..., None] * (0.16 - 0.10 * chip[..., None])
+    col *= (0.968 + grain * 0.050)[..., None]
+
+    damp = norm(fbm(5, 3))
+    wet = np.clip(0.13 + cavity * 0.26 + damp * 0.24 - chip * 0.12 - grain * 0.06, 0.05, 0.85)
+    wet *= 0.36 / max(wet.mean(), 1e-6)
+    return np.clip(col, 0, 1), np.clip(wet, 0.05, 0.85)
+
+
 def dxt1_solid(rgb):
     """A 16x16 DXT1 thumbnail, one flat colour per block."""
     small = np.asarray(Image.fromarray(rgb).resize((4, 4), Image.BOX)).astype(int)
@@ -215,6 +256,6 @@ def save(name, col, wet):
 
 
 if __name__ == "__main__":
-    for name, make in (("flesh", flesh), ("fiber", fiber)):
+    for name, make in (("flesh", flesh), ("fiber", fiber), ("dense", dense)):
         col, wet = make()
         save(name, col * GAIN, wet)

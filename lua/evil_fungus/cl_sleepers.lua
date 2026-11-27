@@ -334,14 +334,16 @@ local function Quads(sh)
 	return (#sh.pts - 1) * sh.sides
 end
 
-local function Emit(shapes, first, last, S)
+local function Emit(shapes, first, last, S, tint)
 	for k = first, last do
 		local sh = shapes[k]
-		S.Polyline(sh.pts, sh.radii, sh.up, sh.sides, sh.r, sh.g, sh.b, sh.light)
+		local r, g, b = sh.r, sh.g, sh.b
+		if tint then r, g, b = r * tint[1], g * tint[2], b * tint[3] end
+		S.Polyline(sh.pts, sh.radii, sh.up, sh.sides, r, g, b, sh.light)
 	end
 end
 
-local function Draw(shapes, S)
+local function Draw(shapes, S, tint)
 	local i, n = 1, #shapes
 	while i <= n do
 		local quads, last = 0, i
@@ -352,7 +354,7 @@ local function Draw(shapes, S)
 			last = last + 1
 		end
 		mesh.Begin(MATERIAL_QUADS, quads)
-		local ok, err = pcall(Emit, shapes, i, last - 1, S)
+		local ok, err = pcall(Emit, shapes, i, last - 1, S, tint)
 		mesh.End()
 		if not ok then
 			ErrorNoHalt("Evil Fungus couldn't draw a sleeper: ", err, "\n")
@@ -363,7 +365,7 @@ local function Draw(shapes, S)
 end
 
 -- Kept sleepers don't move, so their wiring is built once in a while instead of every frame.
-local function Bake(rag, shapes, S)
+local function Bake(rag, shapes, S, material, tint)
 	if rag.EvilFungusMesh then rag.EvilFungusMesh:Destroy() end
 	rag.EvilFungusMesh = nil
 	local quads, last = 0, 0
@@ -373,9 +375,9 @@ local function Bake(rag, shapes, S)
 		quads, last = quads + q, k
 	end
 	if quads == 0 then return end
-	local im = Mesh(S.MAT)
+	local im = Mesh(material)
 	mesh.Begin(im, MATERIAL_QUADS, quads)
-	local ok, err = pcall(Emit, shapes, 1, last, S)
+	local ok, err = pcall(Emit, shapes, 1, last, S, tint)
 	mesh.End()
 	if not ok then ErrorNoHalt("Evil Fungus couldn't build a sleeper: ", err, "\n") end
 	rag.EvilFungusMesh = im
@@ -418,19 +420,21 @@ EvilFungus.DrawPass("EvilFungusSleepers", function()
 
 	render.SetMaterial(S.MAT)
 	local eye = EyePos()
-	local shapes = {}
+	local shapes, denseShapes = {}, {}
 	for _, rag in ipairs(sleepers) do
 		local d2 = IsValid(rag) and rag:GetPos():DistToSqr(eye)
 		local stage = d2 and rag:GetNW2Int(EvilFungus.STAGE_VAR, 0)
+		local dense = rag:GetNW2Bool(EvilFungus.DENSE_VAR, false)
+		local bucket = dense and denseShapes or shapes
 		if d2 and d2 < RANGE * RANGE and (stage == HOST or stage == SPENT) then
 			local c = Cache(rag)
 			rag:SetupBones()
 			local light = Lit(rag, clock, S)
-			Limbs(shapes, rag, c, vector_up, light, S)
+			Limbs(bucket, rag, c, vector_up, light, S)
 			if stage == HOST then
-				Tendrils(shapes, rag, c, now, light, S)
+				Tendrils(bucket, rag, c, now, light, S)
 				local anchor = rag:GetNW2Vector(EvilFungus.ANCHOR_VAR)
-				if not anchor:IsZero() then Tether(shapes, rag, anchor, light, S) end
+				if not anchor:IsZero() then Tether(bucket, rag, anchor, light, S) end
 			end
 		elseif d2 and d2 < RANGE * RANGE then
 			local nest, up, light = Frame(rag, S)
@@ -443,29 +447,36 @@ EvilFungus.DrawPass("EvilFungusSleepers", function()
 				if stage == KEPT then
 					local consumed = rag:GetNW2Float(EvilFungus.CONSUMED_VAR, 0)
 					local growing = consumed < 1 or (rag.EvilFungusBakedK or 0) < 1 or t < WIRE_GROW + 1
-					if not rag.EvilFungusMesh or growing and clock - (rag.EvilFungusBakedAt or 0) > REBUILD then
+					local stale = clock - (rag.EvilFungusBakedAt or 0) > REBUILD
+					if not rag.EvilFungusMesh or rag.EvilFungusBakedDense ~= dense or growing and stale then
 						local static = {}
 						Limbs(static, rag, c, up, light, S)
 						Wires(static, rag, c, nest, up, t, light, S)
 						Fibers(static, rag, c, nest, up, t, now, light)
-						Bake(rag, static, S)
+						Bake(rag, static, S, dense and S.DENSE or S.MAT, dense and S.DENSE_TINT)
 						rag.EvilFungusBakedAt = clock
 						rag.EvilFungusBakedK = consumed
+						rag.EvilFungusBakedDense = dense
 					end
 					if rag.EvilFungusMesh then rag.EvilFungusMesh:Draw() end
-					Vein(shapes, rag, c, nest, up, now, light, S)
+					Vein(bucket, rag, c, nest, up, now, light, S)
 				else
 					if stage == CONSUMING then
-						if close then Fibers(shapes, rag, c, nest, up, t, now, light) end
-						Wires(shapes, rag, c, nest, up, t, light, S)
-						Vein(shapes, rag, c, nest, up, now, light, S)
+						if close then Fibers(bucket, rag, c, nest, up, t, now, light) end
+						Wires(bucket, rag, c, nest, up, t, light, S)
+						Vein(bucket, rag, c, nest, up, now, light, S)
 					end
-					Limbs(shapes, rag, c, up, light, S)
+					Limbs(bucket, rag, c, up, light, S)
 				end
 			end
 		end
 	end
 	if #shapes > 0 then Draw(shapes, S) end
+	-- Taken by hardened strands: same shapes, dense skin and the tint the mat puts on it.
+	if #denseShapes > 0 then
+		render.SetMaterial(S.DENSE)
+		Draw(denseShapes, S, S.DENSE_TINT)
+	end
 	EvilFungus.Measure("sleepers", started)
 end)
 

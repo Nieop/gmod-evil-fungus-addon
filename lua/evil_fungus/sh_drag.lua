@@ -8,6 +8,8 @@ EvilFungus.STAGE_VAR = "EvilFungusStage"
 EvilFungus.STAGE_AT_VAR = "EvilFungusStageAt"
 EvilFungus.NEST_VAR = "EvilFungusNest"
 EvilFungus.NEST_UP_VAR = "EvilFungusNestUp"
+-- Set on a body the mat has taken, so the client can dress the capture in the same skin that took it.
+EvilFungus.DENSE_VAR = "EvilFungusDense"
 EvilFungus.CONSUMED_VAR = "EvilFungusConsumed"
 EvilFungus.SINCE_VAR = "EvilFungusSince"
 EvilFungus.WHOLE_VAR = "EvilFungusWhole"
